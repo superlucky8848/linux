@@ -31,13 +31,14 @@ int pci_enable_rom(struct pci_dev *pdev)
 	if (!res->flags)
 		return -1;
 
-	pcibios_resource_to_bus(pdev, &region, res);
+	pcibios_resource_to_bus(pdev->bus, &region, res);
 	pci_read_config_dword(pdev, pdev->rom_base_reg, &rom_addr);
 	rom_addr &= ~PCI_ROM_ADDRESS_MASK;
 	rom_addr |= region.start | PCI_ROM_ADDRESS_ENABLE;
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(pci_enable_rom);
 
 /**
  * pci_disable_rom - disable ROM decoding for a PCI device
@@ -53,6 +54,7 @@ void pci_disable_rom(struct pci_dev *pdev)
 	rom_addr &= ~PCI_ROM_ADDRESS_ENABLE;
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr);
 }
+EXPORT_SYMBOL_GPL(pci_disable_rom);
 
 /**
  * pci_get_rom_size - obtain the actual size of the ROM image
@@ -69,6 +71,7 @@ size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom, size_t size)
 {
 	void __iomem *image;
 	int last_image;
+	unsigned length;
 
 	image = rom;
 	do {
@@ -91,34 +94,13 @@ size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom, size_t size)
 		if (readb(pds + 3) != 'R')
 			break;
 		last_image = readb(pds + 21) & 0x80;
-		/* this length is reliable */
-		image += readw(pds + 16) * 512;
-	} while (!last_image);
+		length = readw(pds + 16);
+		image += length * 512;
+	} while (length && !last_image);
 
 	/* never return a size larger than the PCI resource window */
 	/* there are known ROMs that get the size wrong */
 	return min((size_t)(image - rom), size);
-}
-
-static loff_t pci_find_rom(struct pci_dev *pdev, size_t *size)
-{
-	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
-	loff_t start;
-
-	/* assign the ROM an address if it doesn't have one */
-	if (res->parent == NULL && pci_assign_resource(pdev, PCI_ROM_RESOURCE))
-		return 0;
-	start = pci_resource_start(pdev, PCI_ROM_RESOURCE);
-	*size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
-
-	if (*size == 0)
-		return 0;
-
-	/* Enable ROM space decodes */
-	if (pci_enable_rom(pdev))
-		return 0;
-
-	return start;
 }
 
 /**
@@ -135,7 +117,7 @@ static loff_t pci_find_rom(struct pci_dev *pdev, size_t *size)
 void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
-	loff_t start = 0;
+	loff_t start;
 	void __iomem *rom;
 
 	/*
@@ -154,20 +136,20 @@ void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 			return (void __iomem *)(unsigned long)
 				pci_resource_start(pdev, PCI_ROM_RESOURCE);
 		} else {
-			start = pci_find_rom(pdev, size);
+			/* assign the ROM an address if it doesn't have one */
+			if (res->parent == NULL &&
+			    pci_assign_resource(pdev, PCI_ROM_RESOURCE))
+				return NULL;
+			start = pci_resource_start(pdev, PCI_ROM_RESOURCE);
+			*size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
+			if (*size == 0)
+				return NULL;
+
+			/* Enable ROM space decodes */
+			if (pci_enable_rom(pdev))
+				return NULL;
 		}
 	}
-
-	/*
-	 * Some devices may provide ROMs via a source other than the BAR
-	 */
-	if (!start && pdev->rom && pdev->romlen) {
-		*size = pdev->romlen;
-		return phys_to_virt(pdev->rom);
-	}
-
-	if (!start)
-		return NULL;
 
 	rom = ioremap(start, *size);
 	if (!rom) {
@@ -187,6 +169,7 @@ void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 	*size = pci_get_rom_size(pdev, rom, *size);
 	return rom;
 }
+EXPORT_SYMBOL(pci_map_rom);
 
 /**
  * pci_unmap_rom - unmap the ROM from kernel space
@@ -202,13 +185,13 @@ void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 	if (res->flags & (IORESOURCE_ROM_COPY | IORESOURCE_ROM_BIOS_COPY))
 		return;
 
-	if (!pdev->rom || !pdev->romlen)
-		iounmap(rom);
+	iounmap(rom);
 
 	/* Disable again before continuing, leave enabled if pci=rom */
 	if (!(res->flags & (IORESOURCE_ROM_ENABLE | IORESOURCE_ROM_SHADOW)))
 		pci_disable_rom(pdev);
 }
+EXPORT_SYMBOL(pci_unmap_rom);
 
 /**
  * pci_cleanup_rom - free the ROM copy created by pci_map_rom_copy
@@ -219,15 +202,29 @@ void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 void pci_cleanup_rom(struct pci_dev *pdev)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
+
 	if (res->flags & IORESOURCE_ROM_COPY) {
-		kfree((void*)(unsigned long)res->start);
+		kfree((void *)(unsigned long)res->start);
+		res->flags |= IORESOURCE_UNSET;
 		res->flags &= ~IORESOURCE_ROM_COPY;
 		res->start = 0;
 		res->end = 0;
 	}
 }
 
-EXPORT_SYMBOL(pci_map_rom);
-EXPORT_SYMBOL(pci_unmap_rom);
-EXPORT_SYMBOL_GPL(pci_enable_rom);
-EXPORT_SYMBOL_GPL(pci_disable_rom);
+/**
+ * pci_platform_rom - provides a pointer to any ROM image provided by the
+ * platform
+ * @pdev: pointer to pci device struct
+ * @size: pointer to receive size of pci window over ROM
+ */
+void __iomem *pci_platform_rom(struct pci_dev *pdev, size_t *size)
+{
+	if (pdev->rom && pdev->romlen) {
+		*size = pdev->romlen;
+		return phys_to_virt((phys_addr_t)pdev->rom);
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL(pci_platform_rom);
