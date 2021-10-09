@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Focaltech TouchPad PS/2 mouse driver
  *
  * Copyright (c) 2014 Red Hat Inc.
  * Copyright (c) 2014 Mathias Gottschlag <mgottschlag@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Red Hat authors:
  *
@@ -43,16 +39,10 @@ int focaltech_detect(struct psmouse *psmouse, bool set_properties)
 
 	if (set_properties) {
 		psmouse->vendor = "FocalTech";
-		psmouse->name = "FocalTech Touchpad";
+		psmouse->name = "Touchpad";
 	}
 
 	return 0;
-}
-
-static void focaltech_reset(struct psmouse *psmouse)
-{
-	ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
-	psmouse_reset(psmouse);
 }
 
 #ifdef CONFIG_MOUSE_PS2_FOCALTECH
@@ -66,9 +56,6 @@ static void focaltech_reset(struct psmouse *psmouse)
 #define FOC_REL 0x9 /* relative position of 1-2 fingers */
 
 #define FOC_MAX_FINGERS 5
-
-#define FOC_MAX_X 2431
-#define FOC_MAX_Y 1663
 
 /*
  * Current state of a single finger on the touchpad.
@@ -106,6 +93,16 @@ struct focaltech_hw_state {
 	 */
 	struct focaltech_finger_state fingers[FOC_MAX_FINGERS];
 
+	/*
+	 * Finger width 0-7 and 15 for a very big contact area.
+	 * 15 value stays until the finger is released.
+	 * Width is reported only in absolute packets.
+	 * Since hardware reports width only for last touching finger,
+	 * there is no need to store width for every specific finger,
+	 * so we keep only last value reported.
+	 */
+	unsigned int width;
+
 	/* True if the clickpad has been pressed. */
 	bool pressed;
 };
@@ -129,15 +126,24 @@ static void focaltech_report_state(struct psmouse *psmouse)
 		input_mt_slot(dev, i);
 		input_mt_report_slot_state(dev, MT_TOOL_FINGER, active);
 		if (active) {
-			input_report_abs(dev, ABS_MT_POSITION_X, finger->x);
+			unsigned int clamped_x, clamped_y;
+			/*
+			 * The touchpad might report invalid data, so we clamp
+			 * the resulting values so that we do not confuse
+			 * userspace.
+			 */
+			clamped_x = clamp(finger->x, 0U, priv->x_max);
+			clamped_y = clamp(finger->y, 0U, priv->y_max);
+			input_report_abs(dev, ABS_MT_POSITION_X, clamped_x);
 			input_report_abs(dev, ABS_MT_POSITION_Y,
-					 FOC_MAX_Y - finger->y);
+					 priv->y_max - clamped_y);
+			input_report_abs(dev, ABS_TOOL_WIDTH, state->width);
 		}
 	}
 	input_mt_report_pointer_emulation(dev, true);
 
-	input_report_key(psmouse->dev, BTN_LEFT, state->pressed);
-	input_sync(psmouse->dev);
+	input_report_key(dev, BTN_LEFT, state->pressed);
+	input_sync(dev);
 }
 
 static void focaltech_process_touch_packet(struct psmouse *psmouse,
@@ -180,18 +186,9 @@ static void focaltech_process_abs_packet(struct psmouse *psmouse,
 
 	state->pressed = (packet[0] >> 4) & 1;
 
-	/*
-	 * packet[5] contains some kind of tool size in the most
-	 * significant nibble. 0xff is a special value (latching) that
-	 * signals a large contact area.
-	 */
-	if (packet[5] == 0xff) {
-		state->fingers[finger].valid = false;
-		return;
-	}
-
 	state->fingers[finger].x = ((packet[1] & 0xf) << 8) | packet[2];
 	state->fingers[finger].y = (packet[3] << 8) | packet[4];
+	state->width = packet[5] >> 4;
 	state->fingers[finger].valid = true;
 }
 
@@ -293,6 +290,12 @@ static int focaltech_switch_protocol(struct psmouse *psmouse)
 	return 0;
 }
 
+static void focaltech_reset(struct psmouse *psmouse)
+{
+	ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
+	psmouse_reset(psmouse);
+}
+
 static void focaltech_disconnect(struct psmouse *psmouse)
 {
 	focaltech_reset(psmouse);
@@ -336,6 +339,7 @@ static void focaltech_set_input_params(struct psmouse *psmouse)
 	__set_bit(EV_ABS, dev->evbit);
 	input_set_abs_params(dev, ABS_MT_POSITION_X, 0, priv->x_max, 0, 0);
 	input_set_abs_params(dev, ABS_MT_POSITION_Y, 0, priv->y_max, 0, 0);
+	input_set_abs_params(dev, ABS_TOOL_WIDTH, 0, 15, 0, 0);
 	input_mt_init_slots(dev, 5, INPUT_MT_POINTER);
 	__set_bit(INPUT_PROP_BUTTONPAD, dev->propbit);
 }
@@ -381,6 +385,24 @@ static int focaltech_read_size(struct psmouse *psmouse)
 
 	return 0;
 }
+
+static void focaltech_set_resolution(struct psmouse *psmouse,
+				     unsigned int resolution)
+{
+	/* not supported yet */
+}
+
+static void focaltech_set_rate(struct psmouse *psmouse, unsigned int rate)
+{
+	/* not supported yet */
+}
+
+static void focaltech_set_scale(struct psmouse *psmouse,
+				enum psmouse_scale scale)
+{
+	/* not supported yet */
+}
+
 int focaltech_init(struct psmouse *psmouse)
 {
 	struct focaltech_data *priv;
@@ -415,6 +437,14 @@ int focaltech_init(struct psmouse *psmouse)
 	psmouse->cleanup = focaltech_reset;
 	/* resync is not supported yet */
 	psmouse->resync_time = 0;
+	/*
+	 * rate/resolution/scale changes are not supported yet, and
+	 * the generic implementations of these functions seem to
+	 * confuse some touchpads
+	 */
+	psmouse->set_resolution = focaltech_set_resolution;
+	psmouse->set_rate = focaltech_set_rate;
+	psmouse->set_scale = focaltech_set_scale;
 
 	return 0;
 
@@ -423,24 +453,4 @@ fail:
 	kfree(priv);
 	return error;
 }
-
-bool focaltech_supported(void)
-{
-	return true;
-}
-
-#else /* CONFIG_MOUSE_PS2_FOCALTECH */
-
-int focaltech_init(struct psmouse *psmouse)
-{
-	focaltech_reset(psmouse);
-
-	return 0;
-}
-
-bool focaltech_supported(void)
-{
-	return false;
-}
-
 #endif /* CONFIG_MOUSE_PS2_FOCALTECH */

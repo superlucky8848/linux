@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Extract CPU cache information and expose them via sysfs.
  *
@@ -70,7 +71,8 @@ void show_cacheinfo(struct seq_file *m)
 	struct cacheinfo *cache;
 	int idx;
 
-	get_online_cpus();
+	if (!test_facility(34))
+		return;
 	this_cpu_ci = get_cpu_cacheinfo(cpumask_any(cpu_online_mask));
 	for (idx = 0; idx < this_cpu_ci->num_leaves; idx++) {
 		cache = this_cpu_ci->info_list + idx;
@@ -84,50 +86,37 @@ void show_cacheinfo(struct seq_file *m)
 		seq_printf(m, "associativity=%d", cache->ways_of_associativity);
 		seq_puts(m, "\n");
 	}
-	put_online_cpus();
 }
 
 static inline enum cache_type get_cache_type(struct cache_info *ci, int level)
 {
 	if (level >= CACHE_MAX_LEVEL)
 		return CACHE_TYPE_NOCACHE;
-
 	ci += level;
-
 	if (ci->scope != CACHE_SCOPE_SHARED && ci->scope != CACHE_SCOPE_PRIVATE)
 		return CACHE_TYPE_NOCACHE;
-
 	return cache_type_map[ci->type];
 }
 
 static inline unsigned long ecag(int ai, int li, int ti)
 {
-	unsigned long cmd, val;
-
-	cmd = ai << 4 | li << 1 | ti;
-	asm volatile(".insn	rsy,0xeb000000004c,%0,0,0(%1)" /* ecag */
-		     : "=d" (val) : "a" (cmd));
-	return val;
+	return __ecag(ECAG_CACHE_ATTRIBUTE, ai << 4 | li << 1 | ti);
 }
 
 static void ci_leaf_init(struct cacheinfo *this_leaf, int private,
-			 enum cache_type type, unsigned int level)
+			 enum cache_type type, unsigned int level, int cpu)
 {
 	int ti, num_sets;
-	int cpu = smp_processor_id();
 
 	if (type == CACHE_TYPE_INST)
 		ti = CACHE_TI_INSTRUCTION;
 	else
 		ti = CACHE_TI_UNIFIED;
-
 	this_leaf->level = level + 1;
 	this_leaf->type = type;
 	this_leaf->coherency_line_size = ecag(EXTRACT_LINE_SIZE, level, ti);
-	this_leaf->ways_of_associativity = ecag(EXTRACT_ASSOCIATIVITY,
-						level, ti);
+	this_leaf->ways_of_associativity = ecag(EXTRACT_ASSOCIATIVITY, level, ti);
 	this_leaf->size = ecag(EXTRACT_SIZE, level, ti);
-
 	num_sets = this_leaf->size / this_leaf->coherency_line_size;
 	num_sets /= this_leaf->ways_of_associativity;
 	this_leaf->number_of_sets = num_sets;
@@ -143,9 +132,10 @@ int init_cache_level(unsigned int cpu)
 	union cache_topology ct;
 	enum cache_type ctype;
 
+	if (!test_facility(34))
+		return -EOPNOTSUPP;
 	if (!this_cpu_ci)
 		return -EINVAL;
-
 	ct.raw = ecag(EXTRACT_TOPOLOGY, 0, 0);
 	do {
 		ctype = get_cache_type(&ct.ci[0], level);
@@ -154,34 +144,33 @@ int init_cache_level(unsigned int cpu)
 		/* Separate instruction and data caches */
 		leaves += (ctype == CACHE_TYPE_SEPARATE) ? 2 : 1;
 	} while (++level < CACHE_MAX_LEVEL);
-
 	this_cpu_ci->num_levels = level;
 	this_cpu_ci->num_leaves = leaves;
-
 	return 0;
 }
 
 int populate_cache_leaves(unsigned int cpu)
 {
+	struct cpu_cacheinfo *this_cpu_ci = get_cpu_cacheinfo(cpu);
+	struct cacheinfo *this_leaf = this_cpu_ci->info_list;
 	unsigned int level, idx, pvt;
 	union cache_topology ct;
 	enum cache_type ctype;
-	struct cpu_cacheinfo *this_cpu_ci = get_cpu_cacheinfo(cpu);
-	struct cacheinfo *this_leaf = this_cpu_ci->info_list;
 
+	if (!test_facility(34))
+		return -EOPNOTSUPP;
 	ct.raw = ecag(EXTRACT_TOPOLOGY, 0, 0);
 	for (idx = 0, level = 0; level < this_cpu_ci->num_levels &&
 	     idx < this_cpu_ci->num_leaves; idx++, level++) {
 		if (!this_leaf)
 			return -EINVAL;
-
 		pvt = (ct.ci[level].scope == CACHE_SCOPE_PRIVATE) ? 1 : 0;
 		ctype = get_cache_type(&ct.ci[0], level);
 		if (ctype == CACHE_TYPE_SEPARATE) {
-			ci_leaf_init(this_leaf++, pvt, CACHE_TYPE_DATA, level);
-			ci_leaf_init(this_leaf++, pvt, CACHE_TYPE_INST, level);
+			ci_leaf_init(this_leaf++, pvt, CACHE_TYPE_DATA, level, cpu);
+			ci_leaf_init(this_leaf++, pvt, CACHE_TYPE_INST, level, cpu);
 		} else {
-			ci_leaf_init(this_leaf++, pvt, ctype, level);
+			ci_leaf_init(this_leaf++, pvt, ctype, level, cpu);
 		}
 	}
 	return 0;
