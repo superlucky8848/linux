@@ -11,7 +11,9 @@
 struct hyperv_drm_device {
 	/* drm */
 	struct drm_device dev;
-	struct drm_simple_display_pipe pipe;
+	struct drm_plane plane;
+	struct drm_crtc crtc;
+	struct drm_encoder encoder;
 	struct drm_connector connector;
 
 	/* mode */
@@ -46,6 +48,7 @@ int hyperv_mode_config_init(struct hyperv_drm_device *hv);
 int hyperv_update_vram_location(struct hv_device *hdev, phys_addr_t vram_pp);
 int hyperv_update_situation(struct hv_device *hdev, u8 active, u32 bpp,
 			    u32 w, u32 h, u32 pitch);
+int hyperv_hide_hw_ptr(struct hv_device *hdev);
 int hyperv_update_dirt(struct hv_device *hdev, struct drm_rect *rect);
 int hyperv_connect_vsp(struct hv_device *hdev);
 

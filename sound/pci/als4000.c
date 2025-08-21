@@ -806,8 +806,8 @@ static void snd_card_als4000_free( struct snd_card *card )
 	snd_als4000_free_gameport(acard);
 }
 
-static int snd_card_als4000_probe(struct pci_dev *pci,
-				  const struct pci_device_id *pci_id)
+static int __snd_card_als4000_probe(struct pci_dev *pci,
+				    const struct pci_device_id *pci_id)
 {
 	static int dev;
 	struct snd_card *card;
@@ -836,7 +836,7 @@ static int snd_card_als4000_probe(struct pci_dev *pci,
 		return -ENXIO;
 	}
 
-	err = pci_request_regions(pci, "ALS4000");
+	err = pcim_request_all_regions(pci, "ALS4000");
 	if (err < 0)
 		return err;
 	iobase = pci_resource_start(pci, 0);
@@ -877,8 +877,8 @@ static int snd_card_als4000_probe(struct pci_dev *pci,
 
 	snd_als4000_configure(chip);
 
-	strcpy(card->driver, "ALS4000");
-	strcpy(card->shortname, "Avance Logic ALS4000");
+	strscpy(card->driver, "ALS4000");
+	strscpy(card->shortname, "Avance Logic ALS4000");
 	sprintf(card->longname, "%s at 0x%lx, irq %i",
 		card->shortname, chip->alt_port, chip->irq);
 
@@ -930,7 +930,12 @@ static int snd_card_als4000_probe(struct pci_dev *pci,
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
+static int snd_card_als4000_probe(struct pci_dev *pci,
+				  const struct pci_device_id *pci_id)
+{
+	return snd_card_free_on_error(&pci->dev, __snd_card_als4000_probe(pci, pci_id));
+}
+
 static int snd_als4000_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -962,18 +967,14 @@ static int snd_als4000_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_als4000_pm, snd_als4000_suspend, snd_als4000_resume);
-#define SND_ALS4000_PM_OPS	&snd_als4000_pm
-#else
-#define SND_ALS4000_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_als4000_pm, snd_als4000_suspend, snd_als4000_resume);
 
 static struct pci_driver als4000_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_als4000_ids,
 	.probe = snd_card_als4000_probe,
 	.driver = {
-		.pm = SND_ALS4000_PM_OPS,
+		.pm = &snd_als4000_pm,
 	},
 };
 

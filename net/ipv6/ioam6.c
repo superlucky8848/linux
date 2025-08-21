@@ -13,10 +13,12 @@
 #include <linux/ioam6.h>
 #include <linux/ioam6_genl.h>
 #include <linux/rhashtable.h>
+#include <linux/netdevice.h>
 
 #include <net/addrconf.h>
 #include <net/genetlink.h>
 #include <net/ioam6.h>
+#include <net/sch_generic.h>
 
 static void ioam6_ns_release(struct ioam6_namespace *ns)
 {
@@ -133,15 +135,11 @@ static int ioam6_genl_addns(struct sk_buff *skb, struct genl_info *info)
 
 	ns->id = id;
 
-	if (!info->attrs[IOAM6_ATTR_NS_DATA])
-		data32 = IOAM6_U32_UNAVAILABLE;
-	else
-		data32 = nla_get_u32(info->attrs[IOAM6_ATTR_NS_DATA]);
+	data32 = nla_get_u32_default(info->attrs[IOAM6_ATTR_NS_DATA],
+				     IOAM6_U32_UNAVAILABLE);
 
-	if (!info->attrs[IOAM6_ATTR_NS_DATA_WIDE])
-		data64 = IOAM6_U64_UNAVAILABLE;
-	else
-		data64 = nla_get_u64(info->attrs[IOAM6_ATTR_NS_DATA_WIDE]);
+	data64 = nla_get_u64_default(info->attrs[IOAM6_ATTR_NS_DATA_WIDE],
+				     IOAM6_U64_UNAVAILABLE);
 
 	ns->data = cpu_to_be32(data32);
 	ns->data_wide = cpu_to_be64(data64);
@@ -610,6 +608,68 @@ static const struct genl_ops ioam6_genl_ops[] = {
 	},
 };
 
+#define IOAM6_GENL_EV_GRP_OFFSET 0
+
+static const struct genl_multicast_group ioam6_mcgrps[] = {
+	[IOAM6_GENL_EV_GRP_OFFSET] = { .name = IOAM6_GENL_EV_GRP_NAME,
+				       .flags = GENL_MCAST_CAP_NET_ADMIN },
+};
+
+static int ioam6_event_put_trace(struct sk_buff *skb,
+				 struct ioam6_trace_hdr *trace,
+				 unsigned int len)
+{
+	if (nla_put_u16(skb, IOAM6_EVENT_ATTR_TRACE_NAMESPACE,
+			be16_to_cpu(trace->namespace_id)) ||
+	    nla_put_u8(skb, IOAM6_EVENT_ATTR_TRACE_NODELEN, trace->nodelen) ||
+	    nla_put_u32(skb, IOAM6_EVENT_ATTR_TRACE_TYPE,
+			be32_to_cpu(trace->type_be32)) ||
+	    nla_put(skb, IOAM6_EVENT_ATTR_TRACE_DATA,
+		    len - sizeof(struct ioam6_trace_hdr) - trace->remlen * 4,
+		    trace->data + trace->remlen * 4))
+		return 1;
+
+	return 0;
+}
+
+void ioam6_event(enum ioam6_event_type type, struct net *net, gfp_t gfp,
+		 void *opt, unsigned int opt_len)
+{
+	struct nlmsghdr *nlh;
+	struct sk_buff *skb;
+
+	if (!genl_has_listeners(&ioam6_genl_family, net,
+				IOAM6_GENL_EV_GRP_OFFSET))
+		return;
+
+	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, gfp);
+	if (!skb)
+		return;
+
+	nlh = genlmsg_put(skb, 0, 0, &ioam6_genl_family, 0, type);
+	if (!nlh)
+		goto nla_put_failure;
+
+	switch (type) {
+	case IOAM6_EVENT_UNSPEC:
+		WARN_ON_ONCE(1);
+		break;
+	case IOAM6_EVENT_TRACE:
+		if (ioam6_event_put_trace(skb, (struct ioam6_trace_hdr *)opt,
+					  opt_len))
+			goto nla_put_failure;
+		break;
+	}
+
+	genlmsg_end(skb, nlh);
+	genlmsg_multicast_netns(&ioam6_genl_family, net, skb, 0,
+				IOAM6_GENL_EV_GRP_OFFSET, gfp);
+	return;
+
+nla_put_failure:
+	nlmsg_free(skb);
+}
+
 static struct genl_family ioam6_genl_family __ro_after_init = {
 	.name		= IOAM6_GENL_NAME,
 	.version	= IOAM6_GENL_VERSION,
@@ -617,6 +677,9 @@ static struct genl_family ioam6_genl_family __ro_after_init = {
 	.parallel_ops	= true,
 	.ops		= ioam6_genl_ops,
 	.n_ops		= ARRAY_SIZE(ioam6_genl_ops),
+	.resv_start_op	= IOAM6_CMD_NS_SET_SCHEMA + 1,
+	.mcgrps		= ioam6_mcgrps,
+	.n_mcgrps	= ARRAY_SIZE(ioam6_mcgrps),
 	.module		= THIS_MODULE,
 };
 
@@ -631,9 +694,11 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 				    struct ioam6_namespace *ns,
 				    struct ioam6_trace_hdr *trace,
 				    struct ioam6_schema *sc,
-				    u8 sclen)
+				    u8 sclen, bool is_input)
 {
-	struct __kernel_sock_timeval ts;
+	struct net_device *dev = skb_dst_dev(skb);
+	struct timespec64 ts;
+	ktime_t tstamp;
 	u64 raw64;
 	u32 raw32;
 	u16 raw16;
@@ -645,10 +710,10 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 	/* hop_lim and node_id */
 	if (trace->type.bit0) {
 		byte = ipv6_hdr(skb)->hop_limit;
-		if (skb->dev)
+		if (is_input)
 			byte--;
 
-		raw32 = dev_net(skb_dst(skb)->dev)->ipv6.sysctl.ioam6_id;
+		raw32 = dev_net(dev)->ipv6.sysctl.ioam6_id;
 
 		*(__be32 *)data = cpu_to_be32((byte << 24) | raw32);
 		data += sizeof(__be32);
@@ -659,15 +724,15 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 		if (!skb->dev)
 			raw16 = IOAM6_U16_UNAVAILABLE;
 		else
-			raw16 = (__force u16)__in6_dev_get(skb->dev)->cnf.ioam6_id;
+			raw16 = (__force u16)READ_ONCE(__in6_dev_get(skb->dev)->cnf.ioam6_id);
 
 		*(__be16 *)data = cpu_to_be16(raw16);
 		data += sizeof(__be16);
 
-		if (skb_dst(skb)->dev->flags & IFF_LOOPBACK)
+		if (dev->flags & IFF_LOOPBACK)
 			raw16 = IOAM6_U16_UNAVAILABLE;
 		else
-			raw16 = (__force u16)__in6_dev_get(skb_dst(skb)->dev)->cnf.ioam6_id;
+			raw16 = (__force u16)READ_ONCE(__in6_dev_get(dev)->cnf.ioam6_id);
 
 		*(__be16 *)data = cpu_to_be16(raw16);
 		data += sizeof(__be16);
@@ -678,10 +743,9 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 		if (!skb->dev) {
 			*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
 		} else {
-			if (!skb->tstamp)
-				__net_timestamp(skb);
+			tstamp = skb_tstamp_cond(skb, true);
+			ts = ktime_to_timespec64(tstamp);
 
-			skb_get_new_timestamp(skb, &ts);
 			*(__be32 *)data = cpu_to_be32((u32)ts.tv_sec);
 		}
 		data += sizeof(__be32);
@@ -692,13 +756,12 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 		if (!skb->dev) {
 			*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
 		} else {
-			if (!skb->tstamp)
-				__net_timestamp(skb);
+			if (!trace->type.bit2) {
+				tstamp = skb_tstamp_cond(skb, true);
+				ts = ktime_to_timespec64(tstamp);
+			}
 
-			if (!trace->type.bit2)
-				skb_get_new_timestamp(skb, &ts);
-
-			*(__be32 *)data = cpu_to_be32((u32)ts.tv_usec);
+			*(__be32 *)data = cpu_to_be32((u32)(ts.tv_nsec / NSEC_PER_USEC));
 		}
 		data += sizeof(__be32);
 	}
@@ -717,7 +780,19 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 
 	/* queue depth */
 	if (trace->type.bit6) {
-		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		struct netdev_queue *queue;
+		struct Qdisc *qdisc;
+		__u32 qlen, backlog;
+
+		if (dev->flags & IFF_LOOPBACK) {
+			*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		} else {
+			queue = skb_get_tx_queue(dev, skb);
+			qdisc = rcu_dereference(queue->qdisc);
+			qdisc_qstats_qlen_backlog(qdisc, &qlen, &backlog);
+
+			*(__be32 *)data = cpu_to_be32(backlog);
+		}
 		data += sizeof(__be32);
 	}
 
@@ -730,10 +805,10 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 	/* hop_lim and node_id (wide) */
 	if (trace->type.bit8) {
 		byte = ipv6_hdr(skb)->hop_limit;
-		if (skb->dev)
+		if (is_input)
 			byte--;
 
-		raw64 = dev_net(skb_dst(skb)->dev)->ipv6.sysctl.ioam6_id_wide;
+		raw64 = dev_net(dev)->ipv6.sysctl.ioam6_id_wide;
 
 		*(__be64 *)data = cpu_to_be64(((u64)byte << 56) | raw64);
 		data += sizeof(__be64);
@@ -744,15 +819,15 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 		if (!skb->dev)
 			raw32 = IOAM6_U32_UNAVAILABLE;
 		else
-			raw32 = __in6_dev_get(skb->dev)->cnf.ioam6_id_wide;
+			raw32 = READ_ONCE(__in6_dev_get(skb->dev)->cnf.ioam6_id_wide);
 
 		*(__be32 *)data = cpu_to_be32(raw32);
 		data += sizeof(__be32);
 
-		if (skb_dst(skb)->dev->flags & IFF_LOOPBACK)
+		if (dev->flags & IFF_LOOPBACK)
 			raw32 = IOAM6_U32_UNAVAILABLE;
 		else
-			raw32 = __in6_dev_get(skb_dst(skb)->dev)->cnf.ioam6_id_wide;
+			raw32 = READ_ONCE(__in6_dev_get(dev)->cnf.ioam6_id_wide);
 
 		*(__be32 *)data = cpu_to_be32(raw32);
 		data += sizeof(__be32);
@@ -766,6 +841,66 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 
 	/* buffer occupancy */
 	if (trace->type.bit11) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit12 undefined: filled with empty value */
+	if (trace->type.bit12) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit13 undefined: filled with empty value */
+	if (trace->type.bit13) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit14 undefined: filled with empty value */
+	if (trace->type.bit14) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit15 undefined: filled with empty value */
+	if (trace->type.bit15) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit16 undefined: filled with empty value */
+	if (trace->type.bit16) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit17 undefined: filled with empty value */
+	if (trace->type.bit17) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit18 undefined: filled with empty value */
+	if (trace->type.bit18) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit19 undefined: filled with empty value */
+	if (trace->type.bit19) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit20 undefined: filled with empty value */
+	if (trace->type.bit20) {
+		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
+		data += sizeof(__be32);
+	}
+
+	/* bit21 undefined: filled with empty value */
+	if (trace->type.bit21) {
 		*(__be32 *)data = cpu_to_be32(IOAM6_U32_UNAVAILABLE);
 		data += sizeof(__be32);
 	}
@@ -786,21 +921,16 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 /* called with rcu_read_lock() */
 void ioam6_fill_trace_data(struct sk_buff *skb,
 			   struct ioam6_namespace *ns,
-			   struct ioam6_trace_hdr *trace)
+			   struct ioam6_trace_hdr *trace,
+			   bool is_input)
 {
 	struct ioam6_schema *sc;
 	u8 sclen = 0;
 
-	/* Skip if Overflow flag is set OR
-	 * if an unknown type (bit 12-21) is set
+	/* Skip if Overflow flag is set
 	 */
-	if (trace->overflow ||
-	    trace->type.bit12 | trace->type.bit13 | trace->type.bit14 |
-	    trace->type.bit15 | trace->type.bit16 | trace->type.bit17 |
-	    trace->type.bit18 | trace->type.bit19 | trace->type.bit20 |
-	    trace->type.bit21) {
+	if (trace->overflow)
 		return;
-	}
 
 	/* NodeLen does not include Opaque State Snapshot length. We need to
 	 * take it into account if the corresponding bit is set (bit 22) and
@@ -822,7 +952,7 @@ void ioam6_fill_trace_data(struct sk_buff *skb,
 		return;
 	}
 
-	__ioam6_fill_trace_data(skb, ns, trace, sc, sclen);
+	__ioam6_fill_trace_data(skb, ns, trace, sc, sclen, is_input);
 	trace->remlen -= trace->nodelen + sclen;
 }
 

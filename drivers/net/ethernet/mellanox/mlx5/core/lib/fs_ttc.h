@@ -40,13 +40,16 @@ struct mlx5_ttc_rule {
 struct mlx5_ttc_table;
 
 struct ttc_params {
-	struct mlx5_flow_namespace *ns;
+	enum mlx5_flow_namespace_type ns_type;
 	struct mlx5_flow_table_attr ft_attr;
 	struct mlx5_flow_destination dests[MLX5_NUM_TT];
+	DECLARE_BITMAP(ignore_dests, MLX5_NUM_TT);
 	bool   inner_ttc;
+	DECLARE_BITMAP(ignore_tunnel_dests, MLX5_NUM_TUNNEL_TT);
 	struct mlx5_flow_destination tunnel_dests[MLX5_NUM_TUNNEL_TT];
 };
 
+const char *mlx5_ttc_get_name(enum mlx5_traffic_types tt);
 struct mlx5_flow_table *mlx5_get_ttc_flow_table(struct mlx5_ttc_table *ttc);
 
 struct mlx5_ttc_table *mlx5_create_ttc_table(struct mlx5_core_dev *dev,

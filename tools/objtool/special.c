@@ -26,7 +26,7 @@ struct special_entry {
 	unsigned char key; /* jump_label key */
 };
 
-struct special_entry entries[] = {
+static const struct special_entry entries[] = {
 	{
 		.sec = ".altinstructions",
 		.group = true,
@@ -54,29 +54,18 @@ struct special_entry entries[] = {
 	{},
 };
 
-void __weak arch_handle_alternative(unsigned short feature, struct special_alt *alt)
+void __weak arch_handle_alternative(struct special_alt *alt)
 {
 }
 
-static bool reloc2sec_off(struct reloc *reloc, struct section **sec, unsigned long *off)
+static void reloc_to_sec_off(struct reloc *reloc, struct section **sec,
+			     unsigned long *off)
 {
-	switch (reloc->sym->type) {
-	case STT_FUNC:
-		*sec = reloc->sym->sec;
-		*off = reloc->sym->offset + reloc->addend;
-		return true;
-
-	case STT_SECTION:
-		*sec = reloc->sym->sec;
-		*off = reloc->addend;
-		return true;
-
-	default:
-		return false;
-	}
+	*sec = reloc->sym->sec;
+	*off = reloc->sym->offset + reloc_addend(reloc);
 }
 
-static int get_alt_entry(struct elf *elf, struct special_entry *entry,
+static int get_alt_entry(struct elf *elf, const struct special_entry *entry,
 			 struct section *sec, int idx,
 			 struct special_alt *alt)
 {
@@ -95,51 +84,24 @@ static int get_alt_entry(struct elf *elf, struct special_entry *entry,
 						  entry->new_len);
 	}
 
-	if (entry->feature) {
-		unsigned short feature;
-
-		feature = bswap_if_needed(*(unsigned short *)(sec->data->d_buf +
-							      offset +
-							      entry->feature));
-		arch_handle_alternative(feature, alt);
-	}
-
 	orig_reloc = find_reloc_by_dest(elf, sec, offset + entry->orig);
 	if (!orig_reloc) {
-		WARN_FUNC("can't find orig reloc", sec, offset + entry->orig);
+		ERROR_FUNC(sec, offset + entry->orig, "can't find orig reloc");
 		return -1;
 	}
-	if (!reloc2sec_off(orig_reloc, &alt->orig_sec, &alt->orig_off)) {
-		WARN_FUNC("don't know how to handle reloc symbol type %d: %s",
-			   sec, offset + entry->orig,
-			   orig_reloc->sym->type,
-			   orig_reloc->sym->name);
-		return -1;
-	}
+
+	reloc_to_sec_off(orig_reloc, &alt->orig_sec, &alt->orig_off);
+
+	arch_handle_alternative(alt);
 
 	if (!entry->group || alt->new_len) {
 		new_reloc = find_reloc_by_dest(elf, sec, offset + entry->new);
 		if (!new_reloc) {
-			WARN_FUNC("can't find new reloc",
-				  sec, offset + entry->new);
+			ERROR_FUNC(sec, offset + entry->new, "can't find new reloc");
 			return -1;
 		}
 
-		/*
-		 * Skip retpoline .altinstr_replacement... we already rewrite the
-		 * instructions for retpolines anyway, see arch_is_retpoline()
-		 * usage in add_{call,jump}_destinations().
-		 */
-		if (arch_is_retpoline(new_reloc->sym))
-			return 1;
-
-		if (!reloc2sec_off(new_reloc, &alt->new_sec, &alt->new_off)) {
-			WARN_FUNC("don't know how to handle reloc symbol type %d: %s",
-				  sec, offset + entry->new,
-				  new_reloc->sym->type,
-				  new_reloc->sym->name);
-			return -1;
-		}
+		reloc_to_sec_off(new_reloc, &alt->new_sec, &alt->new_off);
 
 		/* _ASM_EXTABLE_EX hack */
 		if (alt->new_off >= 0x7ffffff0)
@@ -151,11 +113,10 @@ static int get_alt_entry(struct elf *elf, struct special_entry *entry,
 
 		key_reloc = find_reloc_by_dest(elf, sec, offset + entry->key);
 		if (!key_reloc) {
-			WARN_FUNC("can't find key reloc",
-				  sec, offset + entry->key);
+			ERROR_FUNC(sec, offset + entry->key, "can't find key reloc");
 			return -1;
 		}
-		alt->key_addend = key_reloc->addend;
+		alt->key_addend = reloc_addend(key_reloc);
 	}
 
 	return 0;
@@ -168,7 +129,7 @@ static int get_alt_entry(struct elf *elf, struct special_entry *entry,
  */
 int special_get_alts(struct elf *elf, struct list_head *alts)
 {
-	struct special_entry *entry;
+	const struct special_entry *entry;
 	struct section *sec;
 	unsigned int nr_entries;
 	struct special_alt *alt;
@@ -181,18 +142,17 @@ int special_get_alts(struct elf *elf, struct list_head *alts)
 		if (!sec)
 			continue;
 
-		if (sec->len % entry->size != 0) {
-			WARN("%s size not a multiple of %d",
-			     sec->name, entry->size);
+		if (sec->sh.sh_size % entry->size != 0) {
+			ERROR("%s size not a multiple of %d", sec->name, entry->size);
 			return -1;
 		}
 
-		nr_entries = sec->len / entry->size;
+		nr_entries = sec->sh.sh_size / entry->size;
 
 		for (idx = 0; idx < nr_entries; idx++) {
 			alt = malloc(sizeof(*alt));
 			if (!alt) {
-				WARN("malloc failed");
+				ERROR_GLIBC("malloc failed");
 				return -1;
 			}
 			memset(alt, 0, sizeof(*alt));

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2016 - 2020 Intel Corporation.
  */
@@ -97,7 +97,7 @@ static void cacheless_memcpy(void *dst, void *src, size_t n)
 	 * there are no security issues.  The extra fault recovery machinery
 	 * is not invoked.
 	 */
-	__copy_user_nocache(dst, (void __user *)src, n, 0);
+	__copy_user_nocache(dst, (void __user *)src, n);
 }
 
 void rvt_wss_exit(struct rvt_dev_info *rdi)
@@ -464,8 +464,6 @@ void rvt_qp_exit(struct rvt_dev_info *rdi)
 	if (qps_inuse)
 		rvt_pr_err(rdi, "QP memory leak! %u still in use\n",
 			   qps_inuse);
-	if (!rdi->qp_dev)
-		return;
 
 	kfree(rdi->qp_dev->qp_table);
 	free_qpn_table(&rdi->qp_dev->qpn_table);
@@ -1109,9 +1107,8 @@ int rvt_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 		}
 		/* initialize timers needed for rc qp */
 		timer_setup(&qp->s_timer, rvt_rc_timeout, 0);
-		hrtimer_init(&qp->s_rnr_timer, CLOCK_MONOTONIC,
-			     HRTIMER_MODE_REL);
-		qp->s_rnr_timer.function = rvt_rc_rnr_retry;
+		hrtimer_setup(&qp->s_rnr_timer, rvt_rc_rnr_retry, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL);
 
 		/*
 		 * Driver needs to set up it's private QP structure and do any
@@ -1223,7 +1220,7 @@ int rvt_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 	spin_lock(&rdi->n_qps_lock);
 	if (rdi->n_qps_allocated == rdi->dparms.props.max_qp) {
 		spin_unlock(&rdi->n_qps_lock);
-		ret = ENOMEM;
+		ret = -ENOMEM;
 		goto bail_ip;
 	}
 
@@ -1300,7 +1297,7 @@ int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err)
 
 	if (qp->s_flags & (RVT_S_TIMER | RVT_S_WAIT_RNR)) {
 		qp->s_flags &= ~(RVT_S_TIMER | RVT_S_WAIT_RNR);
-		del_timer(&qp->s_timer);
+		timer_delete(&qp->s_timer);
 	}
 
 	if (qp->s_flags & RVT_S_ANY_WAIT_SEND)
@@ -2040,7 +2037,7 @@ static int rvt_post_one_wr(struct rvt_qp *qp,
 	wqe = rvt_get_swqe_ptr(qp, qp->s_head);
 
 	/* cplen has length from above */
-	memcpy(&wqe->wr, wr, cplen);
+	memcpy(&wqe->ud_wr, wr, cplen);
 
 	wqe->length = 0;
 	j = 0;
@@ -2549,7 +2546,7 @@ void rvt_stop_rc_timers(struct rvt_qp *qp)
 	/* Remove QP from all timers */
 	if (qp->s_flags & (RVT_S_TIMER | RVT_S_WAIT_RNR)) {
 		qp->s_flags &= ~(RVT_S_TIMER | RVT_S_WAIT_RNR);
-		del_timer(&qp->s_timer);
+		timer_delete(&qp->s_timer);
 		hrtimer_try_to_cancel(&qp->s_rnr_timer);
 	}
 }
@@ -2578,7 +2575,7 @@ static void rvt_stop_rnr_timer(struct rvt_qp *qp)
  */
 void rvt_del_timers_sync(struct rvt_qp *qp)
 {
-	del_timer_sync(&qp->s_timer);
+	timer_delete_sync(&qp->s_timer);
 	hrtimer_cancel(&qp->s_rnr_timer);
 }
 EXPORT_SYMBOL(rvt_del_timers_sync);
@@ -2588,7 +2585,7 @@ EXPORT_SYMBOL(rvt_del_timers_sync);
  */
 static void rvt_rc_timeout(struct timer_list *t)
 {
-	struct rvt_qp *qp = from_timer(qp, t, s_timer);
+	struct rvt_qp *qp = timer_container_of(qp, t, s_timer);
 	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
 	unsigned long flags;
 
@@ -2599,7 +2596,7 @@ static void rvt_rc_timeout(struct timer_list *t)
 
 		qp->s_flags &= ~RVT_S_TIMER;
 		rvp->n_rc_timeouts++;
-		del_timer(&qp->s_timer);
+		timer_delete(&qp->s_timer);
 		trace_rvt_rc_timeout(qp, qp->s_last_psn + 1);
 		if (rdi->driver_f.notify_restart_rc)
 			rdi->driver_f.notify_restart_rc(qp,
@@ -2775,7 +2772,7 @@ void rvt_qp_iter(struct rvt_dev_info *rdi,
 EXPORT_SYMBOL(rvt_qp_iter);
 
 /*
- * This should be called with s_lock held.
+ * This should be called with s_lock and r_lock held.
  */
 void rvt_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
 		       enum ib_wc_status status)
@@ -3073,6 +3070,8 @@ do_write:
 	case IB_WR_ATOMIC_FETCH_AND_ADD:
 		if (unlikely(!(qp->qp_access_flags & IB_ACCESS_REMOTE_ATOMIC)))
 			goto inv_err;
+		if (unlikely(wqe->atomic_wr.remote_addr & (sizeof(u64) - 1)))
+			goto inv_err;
 		if (unlikely(!rvt_rkey_ok(qp, &qp->r_sge.sge, sizeof(u64),
 					  wqe->atomic_wr.remote_addr,
 					  wqe->atomic_wr.rkey,
@@ -3132,7 +3131,9 @@ send_comp:
 	rvp->n_loop_pkts++;
 flush_send:
 	sqp->s_rnr_retry = sqp->s_rnr_retry_cnt;
+	spin_lock(&sqp->r_lock);
 	rvt_send_complete(sqp, wqe, send_status);
+	spin_unlock(&sqp->r_lock);
 	if (local_ops) {
 		atomic_dec(&sqp->local_ops_pending);
 		local_ops = 0;
@@ -3186,9 +3187,15 @@ serr:
 	spin_unlock_irqrestore(&qp->r_lock, flags);
 serr_no_r_lock:
 	spin_lock_irqsave(&sqp->s_lock, flags);
+	spin_lock(&sqp->r_lock);
 	rvt_send_complete(sqp, wqe, send_status);
+	spin_unlock(&sqp->r_lock);
 	if (sqp->ibqp.qp_type == IB_QPT_RC) {
-		int lastwqe = rvt_error_qp(sqp, IB_WC_WR_FLUSH_ERR);
+		int lastwqe;
+
+		spin_lock(&sqp->r_lock);
+		lastwqe = rvt_error_qp(sqp, IB_WC_WR_FLUSH_ERR);
+		spin_unlock(&sqp->r_lock);
 
 		sqp->s_flags &= ~RVT_S_BUSY;
 		spin_unlock_irqrestore(&sqp->s_lock, flags);

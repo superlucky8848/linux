@@ -152,7 +152,7 @@ static int ad7780_write_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_SCALE:
-		if (val != 0)
+		if (val != 0 || val2 == 0)
 			return -EINVAL;
 
 		vref = st->int_vref_mv * 1000000LL;
@@ -203,7 +203,7 @@ static const struct ad_sigma_delta_info ad7780_sigma_delta_info = {
 	.set_mode = ad7780_set_mode,
 	.postprocess_sample = ad7780_postprocess_sample,
 	.has_registers = false,
-	.irq_flags = IRQF_TRIGGER_LOW,
+	.irq_flags = IRQF_TRIGGER_FALLING,
 };
 
 #define _AD7780_CHANNEL(_bits, _wordsize, _mask_all)		\
@@ -355,11 +355,11 @@ static int ad7780_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7780_id[] = {
-	{"ad7170", ID_AD7170},
-	{"ad7171", ID_AD7171},
-	{"ad7780", ID_AD7780},
-	{"ad7781", ID_AD7781},
-	{}
+	{ "ad7170", ID_AD7170 },
+	{ "ad7171", ID_AD7171 },
+	{ "ad7780", ID_AD7780 },
+	{ "ad7781", ID_AD7781 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7780_id);
 
@@ -375,3 +375,4 @@ module_spi_driver(ad7780_driver);
 MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("Analog Devices AD7780 and similar ADCs");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_AD_SIGMA_DELTA");

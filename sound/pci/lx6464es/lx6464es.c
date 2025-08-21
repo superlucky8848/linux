@@ -814,7 +814,7 @@ static int lx_pcm_create(struct lx6464es *chip)
 
 	pcm->info_flags = 0;
 	pcm->nonatomic = true;
-	strcpy(pcm->name, card_name);
+	strscpy(pcm->name, card_name);
 
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
 				       &chip->pci->dev, size, size);
@@ -944,7 +944,7 @@ static int snd_lx6464es_create(struct snd_card *card,
 	mutex_init(&chip->setup_mutex);
 
 	/* request resources */
-	err = pci_request_regions(pci, card_name);
+	err = pcim_request_all_regions(pci, card_name);
 	if (err < 0)
 		return err;
 
@@ -1019,10 +1019,10 @@ static int snd_lx6464es_probe(struct pci_dev *pci,
 	err = snd_lx6464es_create(card, pci);
 	if (err < 0) {
 		dev_err(card->dev, "error during snd_lx6464es_create\n");
-		return err;
+		goto error;
 	}
 
-	strcpy(card->driver, "LX6464ES");
+	strscpy(card->driver, "LX6464ES");
 	sprintf(card->id, "LX6464ES_%02X%02X%02X",
 		chip->mac_address[3], chip->mac_address[4], chip->mac_address[5]);
 
@@ -1036,12 +1036,16 @@ static int snd_lx6464es_probe(struct pci_dev *pci,
 
 	err = snd_card_register(card);
 	if (err < 0)
-		return err;
+		goto error;
 
 	dev_dbg(chip->card->dev, "initialization successful\n");
 	pci_set_drvdata(pci, card);
 	dev++;
 	return 0;
+
+ error:
+	snd_card_free(card);
+	return err;
 }
 
 static struct pci_driver lx6464es_driver = {

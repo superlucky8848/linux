@@ -629,7 +629,6 @@ struct tegra_clk_periph {
 
 #define TEGRA_CLK_PERIPH_MAGIC 0x18221223
 
-extern const struct clk_ops tegra_clk_periph_ops;
 struct clk *tegra_clk_register_periph(const char *name,
 		const char * const *parent_names, int num_parents,
 		struct tegra_clk_periph *periph, void __iomem *clk_base,
@@ -926,5 +925,7 @@ struct clk *tegra20_clk_register_emc(void __iomem *ioaddr, bool low_jitter);
 
 struct clk *tegra210_clk_register_emc(struct device_node *np,
 				      void __iomem *regs);
+
+struct clk *tegra_clk_dev_register(struct clk_hw *hw);
 
 #endif /* TEGRA_CLK_H */

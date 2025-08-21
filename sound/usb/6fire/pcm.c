@@ -175,7 +175,7 @@ static int usb6fire_pcm_stream_start(struct pcm_runtime *rt)
 			}
 		}
 
-		/* wait for first out urb to return (sent in in urb handler) */
+		/* wait for first out urb to return (sent in urb handler) */
 		wait_event_timeout(rt->stream_wait_queue, rt->stream_wait_cond,
 				HZ);
 		if (rt->stream_wait_cond)
@@ -640,7 +640,7 @@ int usb6fire_pcm_init(struct sfire_chip *chip)
 	}
 
 	pcm->private_data = rt;
-	strcpy(pcm->name, "DMX 6Fire USB");
+	strscpy(pcm->name, "DMX 6Fire USB");
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &pcm_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &pcm_ops);
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);

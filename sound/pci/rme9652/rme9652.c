@@ -208,8 +208,11 @@ struct snd_rme9652 {
 	unsigned char ds_channels;
 	unsigned char ss_channels;	/* different for hammerfall/hammerfall-light */
 
-	struct snd_dma_buffer *playback_dma_buf;
-	struct snd_dma_buffer *capture_dma_buf;
+	/* DMA buffers; those are copied instances from the original snd_dma_buf
+	 * objects (which are managed via devres) for the address alignments
+	 */
+	struct snd_dma_buffer playback_dma_buf;
+	struct snd_dma_buffer capture_dma_buf;
 
 	unsigned char *capture_buffer;	/* suitably aligned address */
 	unsigned char *playback_buffer;	/* suitably aligned address */
@@ -227,7 +230,7 @@ struct snd_rme9652 {
 	int last_spdif_sample_rate;	/* so that we can catch externally ... */
 	int last_adat_sample_rate;	/* ... induced rate changes            */
 
-	const char *channel_map;
+	const signed char *channel_map;
 
 	struct snd_card *card;
 	struct snd_pcm *pcm;
@@ -244,12 +247,12 @@ struct snd_rme9652 {
    where the data for that channel can be read/written from/to.
 */
 
-static const char channel_map_9652_ss[26] = {
+static const signed char channel_map_9652_ss[26] = {
 	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
 	18, 19, 20, 21, 22, 23, 24, 25
 };
 
-static const char channel_map_9636_ss[26] = {
+static const signed char channel_map_9636_ss[26] = {
 	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
 	/* channels 16 and 17 are S/PDIF */
 	24, 25,
@@ -257,7 +260,7 @@ static const char channel_map_9636_ss[26] = {
 	-1, -1, -1, -1, -1, -1, -1, -1
 };
 
-static const char channel_map_9652_ds[26] = {
+static const signed char channel_map_9652_ds[26] = {
 	/* ADAT channels are remapped */
 	1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23,
 	/* channels 12 and 13 are S/PDIF */
@@ -266,7 +269,7 @@ static const char channel_map_9652_ds[26] = {
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
 };
 
-static const char channel_map_9636_ds[26] = {
+static const signed char channel_map_9636_ds[26] = {
 	/* ADAT channels are remapped */
 	1, 3, 5, 7, 9, 11, 13, 15,
 	/* channels 8 and 9 are S/PDIF */
@@ -1558,8 +1561,7 @@ snd_rme9652_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buff
 		    x, (unsigned long) rme9652->period_bytes);
 	snd_iprintf(buffer, "Hardware pointer (frames): %ld\n",
 		    rme9652_hw_pointer(rme9652));
-	snd_iprintf(buffer, "Passthru: %s\n",
-		    rme9652->passthru ? "yes" : "no");
+	snd_iprintf(buffer, "Passthru: %s\n", str_yes_no(rme9652->passthru));
 
 	if ((rme9652->control_register & (RME9652_Master | RME9652_wsel)) == 0) {
 		snd_iprintf(buffer, "Clock mode: autosync\n");
@@ -1682,7 +1684,7 @@ snd_rme9652_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buff
 	snd_iprintf(buffer, "\n");
 
 	snd_iprintf(buffer, "Timecode signal: %s\n",
-		    (status & RME9652_tc_valid) ? "yes" : "no");
+		    str_yes_no(status & RME9652_tc_valid));
 
 	/* thru modes */
 
@@ -1719,30 +1721,32 @@ static void snd_rme9652_card_free(struct snd_card *card)
 
 static int snd_rme9652_initialize_memory(struct snd_rme9652 *rme9652)
 {
-	unsigned long pb_bus, cb_bus;
+	struct snd_dma_buffer *capture_dma, *playback_dma;
 
-	rme9652->capture_dma_buf =
-		snd_hammerfall_get_buffer(rme9652->pci, RME9652_DMA_AREA_BYTES);
-	rme9652->playback_dma_buf =
-		snd_hammerfall_get_buffer(rme9652->pci, RME9652_DMA_AREA_BYTES);
-	if (!rme9652->capture_dma_buf || !rme9652->playback_dma_buf) {
+	capture_dma = snd_hammerfall_get_buffer(rme9652->pci, RME9652_DMA_AREA_BYTES);
+	playback_dma = snd_hammerfall_get_buffer(rme9652->pci, RME9652_DMA_AREA_BYTES);
+	if (!capture_dma || !playback_dma) {
 		dev_err(rme9652->card->dev,
 			"%s: no buffers available\n", rme9652->card_name);
 		return -ENOMEM;
 	}
 
-	/* Align to bus-space 64K boundary */
+	/* copy to the own data for alignment */
+	rme9652->capture_dma_buf = *capture_dma;
+	rme9652->playback_dma_buf = *playback_dma;
 
-	cb_bus = ALIGN(rme9652->capture_dma_buf->addr, 0x10000ul);
-	pb_bus = ALIGN(rme9652->playback_dma_buf->addr, 0x10000ul);
+	/* Align to bus-space 64K boundary */
+	rme9652->capture_dma_buf.addr = ALIGN(capture_dma->addr, 0x10000ul);
+	rme9652->playback_dma_buf.addr = ALIGN(playback_dma->addr, 0x10000ul);
 
 	/* Tell the card where it is */
+	rme9652_write(rme9652, RME9652_rec_buffer, rme9652->capture_dma_buf.addr);
+	rme9652_write(rme9652, RME9652_play_buffer, rme9652->playback_dma_buf.addr);
 
-	rme9652_write(rme9652, RME9652_rec_buffer, cb_bus);
-	rme9652_write(rme9652, RME9652_play_buffer, pb_bus);
-
-	rme9652->capture_buffer = rme9652->capture_dma_buf->area + (cb_bus - rme9652->capture_dma_buf->addr);
-	rme9652->playback_buffer = rme9652->playback_dma_buf->area + (pb_bus - rme9652->playback_dma_buf->addr);
+	rme9652->capture_dma_buf.area += rme9652->capture_dma_buf.addr - capture_dma->addr;
+	rme9652->playback_dma_buf.area += rme9652->playback_dma_buf.addr - playback_dma->addr;
+	rme9652->capture_buffer = rme9652->capture_dma_buf.area;
+	rme9652->playback_buffer = rme9652->playback_dma_buf.area;
 
 	return 0;
 }
@@ -1814,7 +1818,7 @@ static snd_pcm_uframes_t snd_rme9652_hw_pointer(struct snd_pcm_substream *substr
 	return rme9652_hw_pointer(rme9652);
 }
 
-static char *rme9652_channel_buffer_location(struct snd_rme9652 *rme9652,
+static signed char *rme9652_channel_buffer_location(struct snd_rme9652 *rme9652,
 					     int stream,
 					     int channel)
 
@@ -1839,10 +1843,10 @@ static char *rme9652_channel_buffer_location(struct snd_rme9652 *rme9652,
 
 static int snd_rme9652_playback_copy(struct snd_pcm_substream *substream,
 				     int channel, unsigned long pos,
-				     void __user *src, unsigned long count)
+				     struct iov_iter *src, unsigned long count)
 {
 	struct snd_rme9652 *rme9652 = snd_pcm_substream_chip(substream);
-	char *channel_buf;
+	signed char *channel_buf;
 
 	if (snd_BUG_ON(pos + count > RME9652_CHANNEL_BUFFER_BYTES))
 		return -EINVAL;
@@ -1852,33 +1856,17 @@ static int snd_rme9652_playback_copy(struct snd_pcm_substream *substream,
 						       channel);
 	if (snd_BUG_ON(!channel_buf))
 		return -EIO;
-	if (copy_from_user(channel_buf + pos, src, count))
+	if (copy_from_iter(channel_buf + pos, count, src) != count)
 		return -EFAULT;
-	return 0;
-}
-
-static int snd_rme9652_playback_copy_kernel(struct snd_pcm_substream *substream,
-					    int channel, unsigned long pos,
-					    void *src, unsigned long count)
-{
-	struct snd_rme9652 *rme9652 = snd_pcm_substream_chip(substream);
-	char *channel_buf;
-
-	channel_buf = rme9652_channel_buffer_location(rme9652,
-						      substream->pstr->stream,
-						      channel);
-	if (snd_BUG_ON(!channel_buf))
-		return -EIO;
-	memcpy(channel_buf + pos, src, count);
 	return 0;
 }
 
 static int snd_rme9652_capture_copy(struct snd_pcm_substream *substream,
 				    int channel, unsigned long pos,
-				    void __user *dst, unsigned long count)
+				    struct iov_iter *dst, unsigned long count)
 {
 	struct snd_rme9652 *rme9652 = snd_pcm_substream_chip(substream);
-	char *channel_buf;
+	signed char *channel_buf;
 
 	if (snd_BUG_ON(pos + count > RME9652_CHANNEL_BUFFER_BYTES))
 		return -EINVAL;
@@ -1888,24 +1876,8 @@ static int snd_rme9652_capture_copy(struct snd_pcm_substream *substream,
 						       channel);
 	if (snd_BUG_ON(!channel_buf))
 		return -EIO;
-	if (copy_to_user(dst, channel_buf + pos, count))
+	if (copy_to_iter(channel_buf + pos, count, dst) != count)
 		return -EFAULT;
-	return 0;
-}
-
-static int snd_rme9652_capture_copy_kernel(struct snd_pcm_substream *substream,
-					   int channel, unsigned long pos,
-					   void *dst, unsigned long count)
-{
-	struct snd_rme9652 *rme9652 = snd_pcm_substream_chip(substream);
-	char *channel_buf;
-
-	channel_buf = rme9652_channel_buffer_location(rme9652,
-						      substream->pstr->stream,
-						      channel);
-	if (snd_BUG_ON(!channel_buf))
-		return -EIO;
-	memcpy(dst, channel_buf + pos, count);
 	return 0;
 }
 
@@ -1914,7 +1886,7 @@ static int snd_rme9652_hw_silence(struct snd_pcm_substream *substream,
 				  unsigned long count)
 {
 	struct snd_rme9652 *rme9652 = snd_pcm_substream_chip(substream);
-	char *channel_buf;
+	signed char *channel_buf;
 
 	channel_buf = rme9652_channel_buffer_location (rme9652,
 						       substream->pstr->stream,
@@ -2259,7 +2231,7 @@ static int snd_rme9652_playback_open(struct snd_pcm_substream *substream)
 	snd_pcm_set_sync(substream);
 
         runtime->hw = snd_rme9652_playback_subinfo;
-	snd_pcm_set_runtime_buffer(substream, rme9652->playback_dma_buf);
+	snd_pcm_set_runtime_buffer(substream, &rme9652->playback_dma_buf);
 
 	if (rme9652->capture_substream == NULL) {
 		rme9652_stop(rme9652);
@@ -2318,7 +2290,7 @@ static int snd_rme9652_capture_open(struct snd_pcm_substream *substream)
 	snd_pcm_set_sync(substream);
 
 	runtime->hw = snd_rme9652_capture_subinfo;
-	snd_pcm_set_runtime_buffer(substream, rme9652->capture_dma_buf);
+	snd_pcm_set_runtime_buffer(substream, &rme9652->capture_dma_buf);
 
 	if (rme9652->playback_substream == NULL) {
 		rme9652_stop(rme9652);
@@ -2365,8 +2337,7 @@ static const struct snd_pcm_ops snd_rme9652_playback_ops = {
 	.prepare =	snd_rme9652_prepare,
 	.trigger =	snd_rme9652_trigger,
 	.pointer =	snd_rme9652_hw_pointer,
-	.copy_user =	snd_rme9652_playback_copy,
-	.copy_kernel =	snd_rme9652_playback_copy_kernel,
+	.copy =		snd_rme9652_playback_copy,
 	.fill_silence =	snd_rme9652_hw_silence,
 };
 
@@ -2378,8 +2349,7 @@ static const struct snd_pcm_ops snd_rme9652_capture_ops = {
 	.prepare =	snd_rme9652_prepare,
 	.trigger =	snd_rme9652_trigger,
 	.pointer =	snd_rme9652_hw_pointer,
-	.copy_user =	snd_rme9652_capture_copy,
-	.copy_kernel =	snd_rme9652_capture_copy_kernel,
+	.copy =		snd_rme9652_capture_copy,
 };
 
 static int snd_rme9652_create_pcm(struct snd_card *card,
@@ -2394,7 +2364,7 @@ static int snd_rme9652_create_pcm(struct snd_card *card,
 
 	rme9652->pcm = pcm;
 	pcm->private_data = rme9652;
-	strcpy(pcm->name, rme9652->card_name);
+	strscpy(pcm->name, rme9652->card_name);
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_rme9652_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_rme9652_capture_ops);
@@ -2436,7 +2406,7 @@ static int snd_rme9652_create(struct snd_card *card,
 
 	spin_lock_init(&rme9652->lock);
 
-	err = pci_request_regions(pci, "rme9652");
+	err = pcim_request_all_regions(pci, "rme9652");
 	if (err < 0)
 		return err;
 	rme9652->port = pci_resource_start(pci, 0);
@@ -2477,7 +2447,7 @@ static int snd_rme9652_create(struct snd_card *card,
 
 	switch (rev) {
 	case 8: /* original eprom */
-		strcpy(card->driver, "RME9636");
+		strscpy(card->driver, "RME9636");
 		if (rme9652->hw_rev == 15) {
 			rme9652->card_name = "RME Digi9636 (Rev 1.5)";
 		} else {
@@ -2486,17 +2456,17 @@ static int snd_rme9652_create(struct snd_card *card,
 		rme9652->ss_channels = RME9636_NCHANNELS;
 		break;
 	case 9: /* W36_G EPROM */
-		strcpy(card->driver, "RME9636");
+		strscpy(card->driver, "RME9636");
 		rme9652->card_name = "RME Digi9636 (Rev G)";
 		rme9652->ss_channels = RME9636_NCHANNELS;
 		break;
 	case 4: /* W52_G EPROM */
-		strcpy(card->driver, "RME9652");
+		strscpy(card->driver, "RME9652");
 		rme9652->card_name = "RME Digi9652 (Rev G)";
 		rme9652->ss_channels = RME9652_NCHANNELS;
 		break;
 	case 3: /* original eprom */
-		strcpy(card->driver, "RME9652");
+		strscpy(card->driver, "RME9652");
 		if (rme9652->hw_rev == 15) {
 			rme9652->card_name = "RME Digi9652 (Rev 1.5)";
 		} else {
@@ -2567,18 +2537,22 @@ static int snd_rme9652_probe(struct pci_dev *pci,
 	rme9652->pci = pci;
 	err = snd_rme9652_create(card, rme9652, precise_ptr[dev]);
 	if (err)
-		return err;
+		goto error;
 
-	strcpy(card->shortname, rme9652->card_name);
+	strscpy(card->shortname, rme9652->card_name);
 
 	sprintf(card->longname, "%s at 0x%lx, irq %d",
 		card->shortname, rme9652->port, rme9652->irq);
 	err = snd_card_register(card);
 	if (err)
-		return err;
+		goto error;
 	pci_set_drvdata(pci, card);
 	dev++;
 	return 0;
+
+ error:
+	snd_card_free(card);
+	return err;
 }
 
 static struct pci_driver rme9652_driver = {

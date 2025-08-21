@@ -79,8 +79,8 @@ struct hwlat_kthread_data {
 	int			nmi_cpu;
 };
 
-struct hwlat_kthread_data hwlat_single_cpu_data;
-DEFINE_PER_CPU(struct hwlat_kthread_data, hwlat_per_cpu_data);
+static struct hwlat_kthread_data hwlat_single_cpu_data;
+static DEFINE_PER_CPU(struct hwlat_kthread_data, hwlat_per_cpu_data);
 
 /* Tells NMIs to call back to the hwlat tracer to record timestamps */
 bool trace_hwlat_callback_enabled;
@@ -130,7 +130,6 @@ static bool hwlat_busy;
 static void trace_hwlat_sample(struct hwlat_sample *sample)
 {
 	struct trace_array *tr = hwlat_trace;
-	struct trace_event_call *call = &event_hwlat;
 	struct trace_buffer *buffer = tr->array_buffer.buffer;
 	struct ring_buffer_event *event;
 	struct hwlat_entry *entry;
@@ -148,8 +147,7 @@ static void trace_hwlat_sample(struct hwlat_sample *sample)
 	entry->nmi_count		= sample->nmi_count;
 	entry->count			= sample->count;
 
-	if (!call_filter_check_discard(call, entry, buffer, event))
-		trace_buffer_unlock_commit_nostack(buffer, event);
+	trace_buffer_unlock_commit_nostack(buffer, event);
 }
 
 /* Macros to encapsulate the time capturing infrastructure */
@@ -327,11 +325,8 @@ static void move_to_next_cpu(void)
 
 	cpus_read_lock();
 	cpumask_and(current_mask, cpu_online_mask, tr->tracing_cpumask);
-	next_cpu = cpumask_next(raw_smp_processor_id(), current_mask);
+	next_cpu = cpumask_next_wrap(raw_smp_processor_id(), current_mask);
 	cpus_read_unlock();
-
-	if (next_cpu >= nr_cpu_ids)
-		next_cpu = cpumask_first(current_mask);
 
 	if (next_cpu >= nr_cpu_ids) /* Shouldn't happen! */
 		goto change_mode;
@@ -339,7 +334,7 @@ static void move_to_next_cpu(void)
 	cpumask_clear(current_mask);
 	cpumask_set_cpu(next_cpu, current_mask);
 
-	sched_setaffinity(0, current_mask);
+	set_cpus_allowed_ptr(current, current_mask);
 	return;
 
  change_mode:
@@ -446,7 +441,7 @@ static int start_single_kthread(struct trace_array *tr)
 
 	}
 
-	sched_setaffinity(kthread->pid, current_mask);
+	set_cpus_allowed_ptr(kthread, current_mask);
 
 	kdata->kthread = kthread;
 	wake_up_process(kthread);
@@ -491,18 +486,18 @@ static void stop_per_cpu_kthreads(void)
 static int start_cpu_kthread(unsigned int cpu)
 {
 	struct task_struct *kthread;
-	char comm[24];
 
-	snprintf(comm, 24, "hwlatd/%d", cpu);
+	/* Do not start a new hwlatd thread if it is already running */
+	if (per_cpu(hwlat_per_cpu_data, cpu).kthread)
+		return 0;
 
-	kthread = kthread_create_on_cpu(kthread_fn, NULL, cpu, comm);
+	kthread = kthread_run_on_cpu(kthread_fn, NULL, cpu, "hwlatd/%u");
 	if (IS_ERR(kthread)) {
 		pr_err(BANNER "could not start sampling thread\n");
 		return -ENOMEM;
 	}
 
 	per_cpu(hwlat_per_cpu_data, cpu).kthread = kthread;
-	wake_up_process(kthread);
 
 	return 0;
 }
@@ -520,6 +515,8 @@ static void hwlat_hotplug_workfn(struct work_struct *dummy)
 	if (!hwlat_busy || hwlat_data.thread_mode != MODE_PER_CPU)
 		goto out_unlock;
 
+	if (!cpu_online(cpu))
+		goto out_unlock;
 	if (!cpumask_test_cpu(cpu, tr->tracing_cpumask))
 		goto out_unlock;
 
@@ -588,9 +585,6 @@ static int start_per_cpu_kthreads(struct trace_array *tr)
 	 */
 	cpumask_and(current_mask, cpu_online_mask, tr->tracing_cpumask);
 
-	for_each_online_cpu(cpu)
-		per_cpu(hwlat_per_cpu_data, cpu).kthread = NULL;
-
 	for_each_cpu(cpu, current_mask) {
 		retval = start_cpu_kthread(cpu);
 		if (retval)
@@ -638,7 +632,7 @@ static int s_mode_show(struct seq_file *s, void *v)
 	else
 		seq_printf(s, "%s", thread_mode_str[mode]);
 
-	if (mode != MODE_MAX)
+	if (mode < MODE_MAX - 1) /* if mode is any but last */
 		seq_puts(s, " ");
 
 	return 0;
@@ -782,21 +776,21 @@ static int init_tracefs(void)
 	if (!top_dir)
 		return -ENOMEM;
 
-	hwlat_sample_window = tracefs_create_file("window", 0640,
+	hwlat_sample_window = tracefs_create_file("window", TRACE_MODE_WRITE,
 						  top_dir,
 						  &hwlat_window,
 						  &trace_min_max_fops);
 	if (!hwlat_sample_window)
 		goto err;
 
-	hwlat_sample_width = tracefs_create_file("width", 0644,
+	hwlat_sample_width = tracefs_create_file("width", TRACE_MODE_WRITE,
 						 top_dir,
 						 &hwlat_width,
 						 &trace_min_max_fops);
 	if (!hwlat_sample_width)
 		goto err;
 
-	hwlat_thread_mode = trace_create_file("mode", 0644,
+	hwlat_thread_mode = trace_create_file("mode", TRACE_MODE_WRITE,
 					      top_dir,
 					      NULL,
 					      &thread_mode_fops);

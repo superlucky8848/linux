@@ -245,6 +245,11 @@ int dce_set_clock(
 	pxl_clk_params.target_pixel_clock_100hz = requested_clk_khz * 10;
 	pxl_clk_params.pll_id = CLOCK_SOURCE_ID_DFS;
 
+	/* DCE 6.0, DCE 6.4: engine clock is the same as PLL0 */
+	if (clk_mgr_base->ctx->dce_version == DCE_VERSION_6_0 ||
+	    clk_mgr_base->ctx->dce_version == DCE_VERSION_6_4)
+		pxl_clk_params.pll_id = CLOCK_SOURCE_ID_PLL0;
+
 	if (clk_mgr_dce->dfs_bypass_active)
 		pxl_clk_params.flags.SET_DISPCLK_DFS_BYPASS = true;
 
@@ -374,6 +379,8 @@ void dce_clock_read_ss_info(struct clk_mgr_internal *clk_mgr_dce)
 				clk_mgr_dce->dprefclk_ss_percentage =
 						info.spread_spectrum_percentage;
 			}
+			if (clk_mgr_dce->base.ctx->dc->config.ignore_dpref_ss)
+				clk_mgr_dce->dprefclk_ss_percentage = 0;
 		}
 	}
 }

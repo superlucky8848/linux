@@ -52,12 +52,6 @@ void xen_resume_notifier_register(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(xen_resume_notifier_register);
 
-void xen_resume_notifier_unregister(struct notifier_block *nb)
-{
-	raw_notifier_chain_unregister(&xen_resume_notifier, nb);
-}
-EXPORT_SYMBOL_GPL(xen_resume_notifier_unregister);
-
 #ifdef CONFIG_HIBERNATE_CALLBACKS
 static int xen_suspend(void *data)
 {
@@ -141,14 +135,14 @@ static void do_suspend(void)
 
 	raw_notifier_call_chain(&xen_resume_notifier, 0, NULL);
 
+	xen_arch_resume();
+
 	dpm_resume_start(si.cancelled ? PMSG_THAW : PMSG_RESTORE);
 
 	if (err) {
 		pr_err("failed to start xen_suspend: %d\n", err);
 		si.cancelled = 1;
 	}
-
-	xen_arch_resume();
 
 out_resume:
 	if (!si.cancelled)
@@ -205,10 +199,10 @@ static void do_poweroff(void)
 static void do_reboot(void)
 {
 	shutting_down = SHUTDOWN_POWEROFF; /* ? */
-	ctrl_alt_del();
+	orderly_reboot();
 }
 
-static struct shutdown_handler shutdown_handlers[] = {
+static const struct shutdown_handler shutdown_handlers[] = {
 	{ "poweroff",	true,	do_poweroff },
 	{ "halt",	false,	do_poweroff },
 	{ "reboot",	true,	do_reboot   },

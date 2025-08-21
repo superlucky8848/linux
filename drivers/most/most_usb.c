@@ -149,7 +149,8 @@ static inline int drci_rd_reg(struct usb_device *dev, u16 reg, u16 *buf)
 	retval = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0),
 				 DRCI_READ_REQ, req_type,
 				 0x0000,
-				 reg, dma_buf, sizeof(*dma_buf), 5 * HZ);
+				 reg, dma_buf, sizeof(*dma_buf),
+				 USB_CTRL_GET_TIMEOUT);
 	*buf = le16_to_cpu(*dma_buf);
 	kfree(dma_buf);
 
@@ -176,7 +177,7 @@ static inline int drci_wr_reg(struct usb_device *dev, u16 reg, u16 data)
 			       reg,
 			       NULL,
 			       0,
-			       5 * HZ);
+			       USB_CTRL_SET_TIMEOUT);
 }
 
 static inline int start_sync_ep(struct usb_device *usb_dev, u16 ep)
@@ -256,7 +257,7 @@ static int hdm_poison_channel(struct most_interface *iface, int channel)
 		mdev->padding_active[channel] = false;
 
 	if (mdev->conf[channel].data_type == MOST_CH_ASYNC) {
-		del_timer_sync(&mdev->link_stat_timer);
+		timer_delete_sync(&mdev->link_stat_timer);
 		cancel_work_sync(&mdev->poll_work_obj);
 	}
 	mutex_unlock(&mdev->io_mutex);
@@ -659,14 +660,14 @@ static void hdm_request_netinfo(struct most_interface *iface, int channel,
 
 /**
  * link_stat_timer_handler - schedule work obtaining mac address and link status
- * @data: pointer to USB device instance
+ * @t: pointer to timer_list which holds a pointer to the USB device instance
  *
  * The handler runs in interrupt context. That's why we need to defer the
  * tasks to a work queue.
  */
 static void link_stat_timer_handler(struct timer_list *t)
 {
-	struct most_dev *mdev = from_timer(mdev, t, link_stat_timer);
+	struct most_dev *mdev = timer_container_of(mdev, t, link_stat_timer);
 
 	schedule_work(&mdev->poll_work_obj);
 	mdev->link_stat_timer.expires = jiffies + (2 * HZ);
@@ -762,14 +763,14 @@ static void wq_clear_halt(struct work_struct *wq_obj)
 	mutex_unlock(&mdev->io_mutex);
 }
 
-/**
+/*
  * hdm_usb_fops - file operation table for USB driver
  */
 static const struct file_operations hdm_usb_fops = {
 	.owner = THIS_MODULE,
 };
 
-/**
+/*
  * usb_device_id - ID table for HCD device probing
  */
 static const struct usb_device_id usbid[] = {
@@ -830,7 +831,7 @@ static ssize_t value_show(struct device *dev, struct device_attribute *attr,
 	int err;
 
 	if (sysfs_streq(name, "arb_address"))
-		return snprintf(buf, PAGE_SIZE, "%04x\n", dci_obj->reg_addr);
+		return sysfs_emit(buf, "%04x\n", dci_obj->reg_addr);
 
 	if (sysfs_streq(name, "arb_value"))
 		reg_addr = dci_obj->reg_addr;
@@ -842,7 +843,7 @@ static ssize_t value_show(struct device *dev, struct device_attribute *attr,
 	if (err < 0)
 		return err;
 
-	return snprintf(buf, PAGE_SIZE, "%04x\n", val);
+	return sysfs_emit(buf, "%04x\n", val);
 }
 
 static ssize_t value_store(struct device *dev, struct device_attribute *attr,
@@ -1114,7 +1115,7 @@ static void hdm_disconnect(struct usb_interface *interface)
 	mdev->usb_device = NULL;
 	mutex_unlock(&mdev->io_mutex);
 
-	del_timer_sync(&mdev->link_stat_timer);
+	timer_delete_sync(&mdev->link_stat_timer);
 	cancel_work_sync(&mdev->poll_work_obj);
 
 	if (mdev->dci)

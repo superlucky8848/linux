@@ -60,6 +60,7 @@
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 #include <linux/gfp.h>
+#include <linux/string.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -69,7 +70,7 @@
 #include <sound/initval.h>
 
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/atomic.h>
 #include <linux/module.h>
 
@@ -688,7 +689,7 @@ static void dbri_cmdsend(struct snd_dbri *dbri, s32 *cmd, int len)
 {
 	u32 dvma_addr = (u32)dbri->dma_dvma;
 	s32 tmp, addr;
-	static int wait_id = 0;
+	static int wait_id;
 
 	wait_id++;
 	wait_id &= 0xffff;	/* restrict it to a 16 bit counter. */
@@ -1926,7 +1927,7 @@ static void dbri_process_interrupt_buffer(struct snd_dbri *dbri)
 static irqreturn_t snd_dbri_interrupt(int irq, void *dev_id)
 {
 	struct snd_dbri *dbri = dev_id;
-	static int errcnt = 0;
+	static int errcnt;
 	int x;
 
 	if (dbri == NULL)
@@ -2239,7 +2240,7 @@ static int snd_dbri_pcm(struct snd_card *card)
 
 	pcm->private_data = card->private_data;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, card->shortname);
+	strscpy(pcm->name, card->shortname);
 
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS,
 				       NULL, 64 * 1024, 64 * 1024);
@@ -2446,7 +2447,7 @@ static int snd_dbri_mixer(struct snd_card *card)
 		return -EINVAL;
 	dbri = card->private_data;
 
-	strcpy(card->mixername, card->shortname);
+	strscpy(card->mixername, card->shortname);
 
 	for (idx = 0; idx < ARRAY_SIZE(dbri_controls); idx++) {
 		err = snd_ctl_add(card,
@@ -2591,7 +2592,7 @@ static int dbri_probe(struct platform_device *op)
 	struct snd_dbri *dbri;
 	struct resource *rp;
 	struct snd_card *card;
-	static int dev = 0;
+	static int dev;
 	int irq;
 	int err;
 
@@ -2613,10 +2614,10 @@ static int dbri_probe(struct platform_device *op)
 	if (err < 0)
 		return err;
 
-	strcpy(card->driver, "DBRI");
-	strcpy(card->shortname, "Sun DBRI");
+	strscpy(card->driver, "DBRI");
+	strscpy(card->shortname, "Sun DBRI");
 	rp = &op->resource[0];
-	sprintf(card->longname, "%s at 0x%02lx:0x%016Lx, irq %d",
+	sprintf(card->longname, "%s at 0x%02lx:0x%016llx, irq %d",
 		card->shortname,
 		rp->flags & 0xffL, (unsigned long long)rp->start, irq);
 
@@ -2656,14 +2657,12 @@ _err:
 	return err;
 }
 
-static int dbri_remove(struct platform_device *op)
+static void dbri_remove(struct platform_device *op)
 {
 	struct snd_card *card = dev_get_drvdata(&op->dev);
 
 	snd_dbri_free(card->private_data);
 	snd_card_free(card);
-
-	return 0;
 }
 
 static const struct of_device_id dbri_match[] = {

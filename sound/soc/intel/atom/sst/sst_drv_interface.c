@@ -55,19 +55,6 @@ int free_stream_context(struct intel_sst_drv *ctx, unsigned int str_id)
 	return ret;
 }
 
-int sst_get_stream_allocated(struct intel_sst_drv *ctx,
-	struct snd_sst_params *str_param,
-	struct snd_sst_lib_download **lib_dnld)
-{
-	int retval;
-
-	retval = ctx->ops->alloc_stream(ctx, str_param);
-	if (retval > 0)
-		dev_dbg(ctx->dev, "Stream allocated %d\n", retval);
-	return retval;
-
-}
-
 /*
  * sst_get_sfreq - this function returns the frequency of the stream
  *
@@ -136,11 +123,10 @@ static int sst_power_control(struct device *dev, bool state)
 	int usage_count = 0;
 
 	if (state) {
-		ret = pm_runtime_get_sync(dev);
+		ret = pm_runtime_resume_and_get(dev);
 		usage_count = GET_USAGE_COUNT(dev);
 		dev_dbg(ctx->dev, "Enable: pm usage count: %d\n", usage_count);
 		if (ret < 0) {
-			pm_runtime_put_sync(dev);
 			dev_err(ctx->dev, "Runtime get failed with err: %d\n", ret);
 			return ret;
 		}
@@ -193,11 +179,9 @@ static int sst_cdev_open(struct device *dev,
 	struct stream_info *stream;
 	struct intel_sst_drv *ctx = dev_get_drvdata(dev);
 
-	retval = pm_runtime_get_sync(ctx->dev);
-	if (retval < 0) {
-		pm_runtime_put_sync(ctx->dev);
+	retval = pm_runtime_resume_and_get(ctx->dev);
+	if (retval < 0)
 		return retval;
-	}
 
 	str_id = sst_get_stream(ctx, str_params);
 	if (str_id > 0) {
@@ -433,17 +417,6 @@ static int sst_cdev_codec_caps(struct snd_compr_codec_caps *codec)
 	return 0;
 }
 
-void sst_cdev_fragment_elapsed(struct intel_sst_drv *ctx, int str_id)
-{
-	struct stream_info *stream;
-
-	dev_dbg(ctx->dev, "fragment elapsed from firmware for str_id %d\n",
-			str_id);
-	stream = &ctx->streams[str_id];
-	if (stream->compr_cb)
-		stream->compr_cb(stream->compr_cb_param);
-}
-
 /*
  * sst_close_pcm_stream - Close PCM interface
  *
@@ -645,11 +618,9 @@ static int sst_send_byte_stream(struct device *dev,
 
 	if (NULL == bytes)
 		return -EINVAL;
-	ret_val = pm_runtime_get_sync(ctx->dev);
-	if (ret_val < 0) {
-		pm_runtime_put_sync(ctx->dev);
+	ret_val = pm_runtime_resume_and_get(ctx->dev);
+	if (ret_val < 0)
 		return ret_val;
-	}
 
 	ret_val = sst_send_byte_stream_mrfld(ctx, bytes);
 	sst_pm_runtime_put(ctx);

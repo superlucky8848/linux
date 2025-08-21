@@ -72,19 +72,20 @@ static struct kpp_alg curve25519_alg = {
 	.max_size		= curve25519_max_size,
 };
 
-static int curve25519_init(void)
+static int __init curve25519_init(void)
 {
 	return crypto_register_kpp(&curve25519_alg);
 }
 
-static void curve25519_exit(void)
+static void __exit curve25519_exit(void)
 {
 	crypto_unregister_kpp(&curve25519_alg);
 }
 
-subsys_initcall(curve25519_init);
+module_init(curve25519_init);
 module_exit(curve25519_exit);
 
 MODULE_ALIAS_CRYPTO("curve25519");
 MODULE_ALIAS_CRYPTO("curve25519-generic");
+MODULE_DESCRIPTION("Curve25519 elliptic curve (RFC7748)");
 MODULE_LICENSE("GPL");
