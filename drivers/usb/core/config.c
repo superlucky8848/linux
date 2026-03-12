@@ -507,8 +507,8 @@ static int usb_parse_endpoint(struct device *ddev, int cfgno,
 	}
 
 	/* Parse a possible eUSB2 periodic endpoint companion descriptor */
-	if (bcdUSB == 0x0220 && d->wMaxPacketSize == 0 &&
-	    (usb_endpoint_xfer_isoc(d) || usb_endpoint_xfer_int(d)))
+	if (udev->speed == USB_SPEED_HIGH && bcdUSB == 0x0220 &&
+	    !le16_to_cpu(d->wMaxPacketSize) && usb_endpoint_is_isoc_in(d))
 		usb_parse_eusb2_isoc_endpoint_companion(ddev, cfgno, inum, asnum,
 							endpoint, buffer, size);
 
@@ -823,7 +823,7 @@ static int usb_parse_configuration(struct usb_device *dev, int cfgidx,
 			nalts[i] = j = USB_MAXALTSETTING;
 		}
 
-		intfc = kzalloc(struct_size(intfc, altsetting, j), GFP_KERNEL);
+		intfc = kzalloc_flex(*intfc, altsetting, j);
 		config->intf_cache[i] = intfc;
 		if (!intfc)
 			return -ENOMEM;
@@ -1040,7 +1040,12 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 	__u8 cap_type;
 	int ret;
 
-	bos = kzalloc(sizeof(*bos), GFP_KERNEL);
+	if (dev->quirks & USB_QUIRK_NO_BOS) {
+		dev_dbg(ddev, "skipping BOS descriptor\n");
+		return -ENOMSG;
+	}
+
+	bos = kzalloc_obj(*bos);
 	if (!bos)
 		return -ENOMEM;
 
@@ -1061,7 +1066,7 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 	if (total_len < length)
 		return -EINVAL;
 
-	dev->bos = kzalloc(sizeof(*dev->bos), GFP_KERNEL);
+	dev->bos = kzalloc_obj(*dev->bos);
 	if (!dev->bos)
 		return -ENOMEM;
 
